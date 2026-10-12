@@ -150,6 +150,12 @@ machines run it without a RAM budget. Manual workflow: [UD-Q6_K_XL](UNSLOTH_Q6.m
 For **OrcaRouter's Flash-Next Uncensored IQ3_XXS**, see the [manual compatibility setup](ORCA.md). It needs an
 explicit packing conversion and is not an installer menu option.
 
+### agentionai Signal AP-Q4_K_XL
+
+For **agentionai's Signal fine-tune in AP-Q4_K_XL**, see the [manual compatibility setup](SIGNAL_AP_Q4_K_XL.md). It
+has UD-Q4_K_XL's expert gate/up with IQ4_NL downs and Q6_K everywhere else, so it needs the same packing conversion
+plus a BF16 embedding file. It is not an installer menu option.
+
 ## Adding or switching models
 
 You can add another model any time with `SETUP.bat` (the same as `START-HERE.bat --setup`; on Linux
