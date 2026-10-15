@@ -120,8 +120,9 @@ The license is the Swift Open License 1.0. Install it with `strata launch --fami
 ### Unsloth's UD-Q4_K_XL
 
 A 4-bit quantization of the same model (111 GB, 72 GiB of experts). Install it with `--family unsloth --model UD-Q4_K_XL`
-(RAM budget: your RAM less 17 GB, 47 on 64 GB, the rest read from the SSD; the app's "Leave 20% for my work" keeps the earlier RAM less 24 GB, 40 on 64 GB: 16.6 GiB free
-of 64 against 9.3 GiB, decode 57.7 against 84.2 tok/s). What it does and the manual workflow are in
+(from ~88 GB of RAM every expert is kept in RAM; below that a RAM budget of your RAM less 17 GB, 47 on 64 GB, the rest
+read from the SSD; the app's "Leave 20% for my work" keeps the earlier RAM less 24 GB, 40 on 64 GB: 16.6 GiB free of 64
+against 9.3 GiB, decode 57.7 against 84.2 tok/s). What it does and the manual workflow are in
 [UNSLOTH_Q4.md](UNSLOTH_Q4.md).
 
 ---
