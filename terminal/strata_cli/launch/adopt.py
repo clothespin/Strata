@@ -5,8 +5,8 @@ that this Terminal does not run. When setup says it cannot set this card up, and
 prepared before, "use model files I already have"), the run config is simple enough to write here: the same arguments setup writes for the GSQ-RCO models,
 with the engine named as the component (`component:strata-engine`). Nothing is downloaded, prepared or compiled; if a file is missing the person is told which.
 
-Only the GSQ-RCO families (qwen, swift, coder), Gyro (one GGUF with its n-gram table inside), Unsloth's sets and the models of the signed feed (strata_control/feed_models.py:
-a qwen4exp model laid out like Unsloth's sets, or a model of its own shape on that shape's engine component) are adopted this way; images stay off.
+This path adopts GSQ-RCO families (qwen, swift, coder), Gyro and Signal (one GGUF with its n-gram table inside),
+Unsloth's sets, Inkling-2-Mini, Hy4-Flash and models of the signed feed (strata_control/feed_models.py).
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import re
 from pathlib import Path
 
 SHARD = re.compile(r"^(?P<stem>.+)-(?P<i>\d{5})-of-(?P<n>\d{5})\.gguf$")
-FAMILIES = ("qwen", "swift", "coder", "gyro", "unsloth", "inkling-2-mini", "hy4-flash")      # the catalog offers Gyro-S / Gyro-M on an Arc card too (round 8, N11); Unsloth's sets since round 0214; Inkling-2-Mini & Hy4-Flash local .strata/.gguf/.safetensors since 0.2.20
+FAMILIES = ("qwen", "swift", "coder", "gyro", "unsloth", "signal", "inkling-2-mini", "hy4-flash")      # the catalog offers Gyro-S / Gyro-M on an Arc card too (round 8, N11); Unsloth's sets since round 0214; Inkling-2-Mini & Hy4-Flash local .strata/.gguf/.safetensors since 0.2.20
 _INKLING_AUX = re.compile(r"^(?:mmproj|dspark|imatrix|mtp[-_]).*\.gguf$", re.I)
 UNSUPPORTED = ("no nvidia gpu found", "no amd gpu", "nvidia gpu", "not supported", "cannot be used")
 
@@ -55,7 +55,7 @@ def find_shards(folder: Path) -> list[Path]:
 
 
 def find_single(folder: Path) -> list[Path]:
-    """The one model file of a Gyro folder (a single GGUF, not a picture reader); [] when there is none or several."""
+    """The one model file of a Gyro or Signal folder (a single GGUF, not a picture reader); [] when there is none or several."""
     files = [p for p in sorted(Path(folder).glob("*.gguf")) if not p.name.lower().startswith("mmproj")]
     return files if len(files) == 1 else []
 
@@ -98,8 +98,8 @@ def _ensure_inkling_tokenizer(native: Path, folder: Path, data_dir: Path, src: P
 
 
 def model_files(folder: Path, family: str, family_def: dict | None = None) -> list[Path]:
-    """The model files plan() runs: Gyro's one file; a GGUF set's shards; Inkling-2-Mini's .gguf/.strata/.safetensors; Hy4-Flash's .strata/.safetensors; a feed model's shards or single GGUF."""
-    if family == "gyro":
+    """The model files plan() runs: Gyro's or Signal's one file; a GGUF set's shards; Inkling-2-Mini's .gguf/.strata/.safetensors; Hy4-Flash's .strata/.safetensors; a feed model's shards or single GGUF."""
+    if family in ("gyro", "signal"):
         return find_single(folder)
     if family == "inkling-2-mini":
         target = Path(folder)
@@ -232,10 +232,10 @@ def plan(*, family: str, model: str, model_dir: Path, data_dir: Path, src: Path,
     feed = bool((family_def or {}).get("feed"))     # a model of the signed feed (Qwen4 day): the Unsloth layout, its own shape's engine when it has one
     if family not in FAMILIES and not feed:
         # no full stop: the caller joins the problems with "; " and ends the sentence (a "gyro.." came out of the old text, round 8, N11)
-        return None, [f"Strata can write the settings itself only for the Qwen3.8-Flash-Next, Swift, Coder, Gyro, Inkling-2-Mini and Hy4-Flash files, not for {family}"]
+        return None, [f"Strata can write the settings itself only for the Qwen3.8-Flash-Next, Swift, Coder, Gyro, Unsloth, Signal, Inkling-2-Mini and Hy4-Flash files, not for {family}"]
     shards = model_files(model_dir, family, family_def)
     if not shards:
-        problems.append(f"the model file is not in {model_dir}" if family == "gyro" else
+        problems.append(f"the model file is not in {model_dir}" if family in ("gyro", "signal") else
                         f"the model files are not all in {model_dir} (every -0000N-of-0000N.gguf shard is needed)")
     pack = Path(data_dir) / "packs" / (pack_name or model.lower())
     if not (pack / "experts.bin").exists() and not (pack / "index.txt").exists():
@@ -246,6 +246,10 @@ def plan(*, family: str, model: str, model_dir: Path, data_dir: Path, src: Path,
     profile = src / "data" / (family_def.get("profile") or "expert-profile.bin")
     if not profile.exists():
         problems.append(f"the expert profile {profile} is missing")
+    # Signal reads the BF16 embedding that setup writes beside its pack.
+    embd = pack / "token-embd-bf16.gguf" if family_def.get("embd_bf16") else None
+    if embd is not None and not embd.exists():
+        problems.append(f"the BF16 token embedding {embd} is missing (this installer cannot prepare it for this graphics card)")
     if problems:
         return None, problems
     if feed:
@@ -259,10 +263,12 @@ def plan(*, family: str, model: str, model_dir: Path, data_dir: Path, src: Path,
         profile = neutral_profile_if_other_shape(profile, shards[0], pack, GGUFFile, (lambda line: notes.append(line.strip())) if notes is not None else (lambda line: None))
     mtp = Path(data_dir) / "mtp" / "rt"
     args = ["--pack", str(pack), "--native", str(shards[0])]
-    if family != "unsloth" and not feed and (len(shards) > 1 or family == "gyro"):            # Gyro's one file holds the n-gram table too
-        # Swift's n-gram table is in shard 1 (with layers 0-12), as setup.py finds it by tensor name; the last shard made the
-        # engine stop with "per_layer_token_embd.weight is not in ...". The other two-file sets keep it in shard 2.
-        args += ["--ple-gguf", str(shards[0] if family == "swift" else shards[-1])]      # (Unsloth's 3-6 shards: the engine finds the n-gram table by its tensor name, as setup.py writes the config; it is shard 2, 3 or the last one by set)
+    if family != "unsloth" and not feed and (len(shards) > 1 or family in ("gyro", "signal")):
+        # Swift's n-gram table is in shard 1; Gyro and Signal keep it in their only file.
+        # The engine finds it by tensor name for Unsloth's sets.
+        args += ["--ple-gguf", str(shards[0] if family == "swift" else shards[-1])]
+    if embd is not None:
+        args += ["--embd-gguf", str(embd)]
     if backend == "metal":
         # a Mac: the Metal defaults metal/setup_mac.py writes for a model that streams from the SSD (one token per step, no draft layer, the GGUF mapped in place)
         args += ["--expert-profile", str(profile), "--expert-cache", "64", "--prefill", "auto", "--spec", "2", "--suffix-draft", "0",
