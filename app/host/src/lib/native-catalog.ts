@@ -30,7 +30,7 @@ export function nativeCatalogModels(families:NativeFamily[]):CatalogModel[]{
   if(family.feed){groups.push({family:family.family,title:family.title,about:family.about??'',experimental:false,images:family.images,available:family.available,unavailable_reason:family.unavailable_reason,feed:true,sizes:family.sizes.map(size=>({...size,sourceFamily:family.family,edition:'',images:family.images}))});continue;}
   const target=/qwen3[._-]?6|35b[-_]?a3b/i.test(family.title+' '+family.family)?groups[1]:['qwen','swift','coder','unsloth','gyro'].includes(family.family)||/qwen3[._-]?8|flash.next/i.test(family.title)?groups[0]:undefined;
   if(!target)continue;
-  const edition=target===groups[0]?({swift:'Swift 1.5',coder:'Coder',unsloth:'Unsloth',gyro:'Gyro'} as Record<string,string>)[family.family]??'':'';
+  const edition=target===groups[0]?({swift:'Swift 1.5',coder:'Coder',unsloth:'Unsloth',gyro:'Gyro',signal:'Signal'} as Record<string,string>)[family.family]??'':'';
   target.images ||= family.images;
   target.sizes.push(...family.sizes.map(size=>({...size,sourceFamily:family.family,edition,images:family.images})));
  }
