@@ -489,7 +489,7 @@ def main(argv=None) -> int:
         if not (all(f.exists() and S.done(f) for f in files) and pack_done):
             S.warn(f"{model} is not installed here, and an update does not download model files: nothing was installed")
             S.say(f"  to download and prepare {model}: ./setup.sh --setup")
-        elif vision == "yes" and not (models_root / fam["mmproj"]).exists():
+        elif vision == "yes" and not (models_root / fam.get("mmproj_as", fam["mmproj"])).exists():
             S.warn("the image encoder is not downloaded here, and an update does not download model files")
             S.say("  to add image support: ./setup.sh --setup")
         return 0
