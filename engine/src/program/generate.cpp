@@ -8776,7 +8776,14 @@ int main(int argc, char** argv) {
         // The arena pins until the OS refuses; on Windows that leaves no page-locked memory for the small buffers the
         // engine allocates after it (the verify window's staging: "mapped staging allocation failed", exit 1).  Keep a
         // reserve while the arena pins and hand it back after (pin_budget.hpp).
-        if (ple_lock_by_policy)   // #4846: the residency policy priced the table against the arena before the rest of the start took its RAM
+        // #4846: the table's lock is priced against the arena before the rest of the start takes its RAM - for a lock the
+        // residency policy took and for one --ple-io ram took.  Seen with the flag: a PC with 93.5 GiB of RAM and 62.6 GiB
+        // free had the table locked (28.5 GiB) and then could not fill its arena (53.3 GiB), and because a hand-set
+        // --ple-io ram turns the arena's fallback off as well, the engine waited ("another engine still exiting?") and the
+        // host was left in reclaim until it was restarted.  Giving the lock back keeps the table in RAM (its pages stay
+        // cached, they are only no longer pinned against reclaim), and the arena is the one thing here that cannot be
+        // given back.
+        if (ple_table.locked())
             arena_src.give_back_ram = [&]() -> uint64_t {
                 if (!ple_table.locked()) return 0;
                 const uint64_t held = ple_table.table_bytes();

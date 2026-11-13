@@ -54,6 +54,7 @@ class SetupInputs:
     port: Any = None
     q4_split: Any = None
     ram: Any = None
+    ram_free: Any = None       # the RAM free at setup time (setup.ram_available_gb); None: use ram, the total
     reader: Any = None
     ready: Any = None
     rope_scale: Any = None
@@ -111,6 +112,18 @@ def neutral_profile_if_other_shape(shipped, first_shard, pack, GGUFFile, say=pri
         return Path(shipped)
 
 
+def table_ram_wanted(model_ram_gb: float, disk: str | None, table_gb: float, free_ram: float,
+                     low_ram: bool, platform_ok: bool) -> tuple[bool, float]:
+    """#605 #4846: whether the n-gram table is kept in RAM (--ple-io ram), and the RAM that has to be free for it: what
+    the model needs, the table, and the room left over after both (16 GB on an SSD, where the table's reads only cost
+    prompt time; 4 GB on a rotational disk, where they can stall a prompt for minutes).  A rotational disk gets the mode
+    whenever the RAM holds it; an SSD only where it was measured (Linux, not WSL) and not in low-RAM mode.  Setup decides
+    with it, and `--update` / `--calibrate` decide a config's mode again with it (setup.refresh_table_mode)."""
+    slack = 4 if disk else 16
+    need = model_ram_gb + table_gb + slack
+    return (free_ram >= need and (bool(disk) or (not low_ram and platform_ok))), need
+
+
 def config_for(inp: SetupInputs, lib) -> SetupConfig:
     # ---- the names the body uses: what setup decided (inp) and the helpers (lib)
     a = inp.a
@@ -140,6 +153,12 @@ def config_for(inp: SetupInputs, lib) -> SetupConfig:
     port = inp.port
     q4_split = inp.q4_split
     ram = inp.ram
+    # The RAM that is FREE when the engine starts pays for the n-gram table's lock, not the PC's total: the lock is taken
+    # before the expert arena is filled and both have to fit.  On a 93.5 GiB PC (31 GiB of it in the desktop: 62.6 GiB
+    # free) the total passed the table's test, the engine then locked 28.5 GiB and could not fill its 53.3 GiB arena
+    # (an explicit --ple-io ram also turns the arena's fallback off): the machine stalled in reclaim until it was
+    # restarted (#4846).  inp.ram_free is None where the caller does not measure it: the total, as before.
+    free_ram = ram if inp.ram_free is None else inp.ram_free
     reader = inp.reader
     ready = inp.ready
     rope_scale = inp.rope_scale
@@ -268,30 +287,34 @@ def config_for(inp: SetupInputs, lib) -> SetupConfig:
         tensor = None if ready else next((t for t in GGUFFile(ple).tensors if t.name == "per_layer_token_embd.weight"), None)
         size = ple.stat().st_size if ready else getattr(tensor, "expected_bytes", lambda: None)()
         table_gb = size / 1e9 if size else 28.8
-        if ram >= MODELS[model]["ram_gb"] + table_gb + 4:
+        want, need = table_ram_wanted(MODELS[model]["ram_gb"], disk, table_gb, free_ram, low_ram, ple_ram_platform_ok())
+        if want:
             args += ["--ple-io", "ram"]
             ok(f"the model is on a rotational disk ({disk}): its {table_gb:.0f} GB n-gram table is kept in RAM "
                "(--ple-io ram) - read from the disk at random, it can stall prompts for minutes (#605)")
         else:
+            short_gb = max(table_gb, need - free_ram)
             warn(f"the model is on a rotational disk ({disk}): its n-gram table is read from it at random, which can "
-                 f"stall prompts for minutes (#605). An SSD is recommended; with ~{table_gb:.0f} GB more RAM, "
+                 f"stall prompts for minutes (#605). An SSD is recommended; with ~{short_gb:.0f} GB more free RAM, "
                  "--ple-io ram in the config's args keeps the table in RAM instead")
     elif not low_ram and ple_ram_platform_ok():
         # 147-verify: on an SSD too, a PC with RAM to spare keeps the n-gram table in RAM: a new prompt's first chunk then
         # does not wait for its table rows (65,536 random SSD reads at 4K tokens).  RTX PRO 5000 (Linux, NVMe, fresh engine
         # per prompt, 3 rounds, the same bits): prompt 4K 1298 -> 1059 ms (-18%), 20K 4644 -> 4223 ms (-9%), 98K 20447 ->
         # 20027 ms (-2%), decode +0.8%.  On a card whose prompt is slow (R9700) the read hides behind layer 0 and nothing
-        # changes.  It costs the table's size in RAM, so only with 16 GB to spare beyond the model's own need; a smaller PC
-        # keeps reading from the SSD as before.
+        # changes.  It costs the table's size in RAM, so only when the RAM that is free holds the table and what the model
+        # still needs (16 GB to spare beyond it); a smaller PC keeps reading from the SSD as before.
         try:
             tensor = None if ready else next((t for t in GGUFFile(ple).tensors if t.name == "per_layer_token_embd.weight"), None)
             size = ple.stat().st_size if ready else getattr(tensor, "expected_bytes", lambda: None)()
         except Exception:
             size = None
         table_gb = size / 1e9 if size else 28.8
-        if ram >= MODELS[model]["ram_gb"] + table_gb + 16:
+        if table_ram_wanted(MODELS[model]["ram_gb"], None, table_gb, free_ram, low_ram, ple_ram_platform_ok())[0]:
             args += ["--ple-io", "ram"]
-            ok(f"{ram:.0f} GB of RAM: the {table_gb:.0f} GB n-gram table is kept in RAM (--ple-io ram), so a new prompt does "
+            # (the total is the headline number; the free RAM is what the decision used, so say it when the two differ)
+            free_note = "" if ram - free_ram < 1 else f" ({free_ram:.0f} GB free)"
+            ok(f"{ram:.0f} GB of RAM{free_note}: the {table_gb:.0f} GB n-gram table is kept in RAM (--ple-io ram), so a new prompt does "
                "not wait for its rows from the SSD (a 4K prompt about 18% sooner on a fast card); remove --ple-io ram from "
                "the config's args to read it from the SSD instead")
     # KV streaming: from 64K up the whole KV cache lives in RAM and only the part the attention reads (32K positions

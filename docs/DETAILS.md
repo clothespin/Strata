@@ -1485,9 +1485,17 @@ On 12.0 cards (sm_120) these also apply:
   kernels were 4.7% slower on 20K prompts there. `STRATA_PF_FUSED=0` keeps MMQ in a build that has it. The release builds have no MMQ
   (0.2.16 and later): there `=0` runs the prompt experts on the native int8 kernels, which measured slower at 7K to 20K tokens (#6251).
 - `--spec 4 --spec-min-p 0.5` stays the default depth.
-- Setup (Linux, not WSL): when the RAM covers the model's need plus the n-gram table plus 16 GB (Q2_0 93 GB, IQ3_S 107 GB), the table
-  is kept in RAM (`--ple-io ram`), so a new prompt does not wait for its rows from the SSD. With RAM short, ram mode costs
-  prompt time and start-up time, which is why smaller PCs keep the SSD reads.
+- Setup (Linux, not WSL): when the RAM **free at setup time** covers the model's need plus the n-gram table plus 16 GB (Q2_0
+  93 GB, IQ3_S 107 GB), the table is kept in RAM (`--ple-io ram`), so a new prompt does not wait for its rows from the SSD.
+  With RAM short, ram mode costs prompt time and start-up time, which is why smaller PCs keep the SSD reads. The table's lock
+  is taken before the expert arena is filled, and a hand-set `--ple-io ram` also turns the arena's RAM fallback off (the
+  engine loads what was asked for instead of switching to memory-mapped experts), so the two have to fit together: on a PC
+  with 93.5 GiB of RAM, 62.6 GiB of it free and a 53.3 GiB arena, `--ple-io ram` (written for the model's 62 GB plus the
+  table's 29 GB) left the engine waiting over 20 s for the arena and the machine in reclaim until it was restarted. A config
+  that already carries the flag is covered in the engine: the table's lock is given back to the arena (#4846). A
+  plain start writes no config; `./setup.py --setup` decides the mode again, and `./setup.py --update` and
+  `./setup.py --calibrate` decide an installed config's mode again too (the same free-RAM rule), leaving a `--ple-io`
+  the person set in `user_args` alone.
 
 A prompt chunk above 8192 (`--prefill auto:16384` or `auto:32768`) changes the rounding slightly on CUDA (first-token KL against 8192:
 about 1e-4 on plain prompts, UD-Q4_K_XL on an A6000). A bare `--prefill auto` takes a 32768-token ceiling on one NVIDIA card of compute

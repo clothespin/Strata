@@ -490,10 +490,10 @@ class HipVision(unittest.TestCase):
 class RotationalDisk(unittest.TestCase):
     """#605: a model on a rotational disk gets --ple-io ram when the n-gram table fits the RAM, else a warning."""
 
-    def install(self, ram, disk, platform_ok=False, model="Q2_0"):
+    def install(self, ram, disk, platform_ok=False, model="Q2_0", free=None):
         from test_setup_golden import PROFILES, install
         _, found = PROFILES["64GB-1x32GB"]
-        return install(ram, found, ["--family", "qwen", "--model", model, "--no-start"],
+        return install(ram, found, ["--family", "qwen", "--model", model, "--no-start"], free=free,
                        extra=[mock.patch.object(setup, "rotational_disk", lambda p: disk),
                               mock.patch.object(setup, "ple_ram_platform_ok", lambda: platform_ok)])
 
@@ -537,6 +537,27 @@ class RotationalDisk(unittest.TestCase):
             code, out, cfg, _ = self.install(ram, None, platform_ok=True, model="IQ3_S")
             self.assertEqual(code, 0, out)
             self.assertEqual("--ple-io" in cfg["args"], want, (ram, cfg["args"]))
+
+    def test_free_ram_decides_not_the_total(self):
+        # the reporting PC: 93.5 GiB of RAM, 31 GiB of it in the desktop, so 62.6 GiB free, and an expert arena of
+        # 53.3 GiB to fill after the table is locked.  The TOTAL passed the table's test, setup wrote --ple-io ram, the
+        # engine locked 28.5 GiB and then could not fill the arena (an explicit --ple-io ram also turns the arena's
+        # fallback off): the machine stalled in reclaim until it was restarted (#4846).
+        code, out, cfg, _ = self.install(93.5, None, platform_ok=True, free=62.6)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("--ple-io", cfg["args"])
+        # a bigger PC (127.8 GB of RAM) with 110 GB free: the table fits, and the line names the RAM the decision used
+        code, out, cfg, _ = self.install(127.8, None, platform_ok=True, free=110.0)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(cfg["args"][cfg["args"].index("--ple-io") + 1], "ram")
+        self.assertIn("128 GB of RAM (110 GB free)", out)
+
+    def test_free_ram_the_rotational_disk_rule_too(self):
+        # #605's branch counts the free RAM the same way (an HDD PC that was full when setup ran)
+        code, out, cfg, _ = self.install(127.8, "sdb", free=70.0)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("--ple-io", cfg["args"])
+        self.assertIn("An SSD is recommended", out)
 
     def test_sysfs(self):
         if not sys.platform.startswith("linux"):

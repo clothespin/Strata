@@ -153,7 +153,9 @@ a local build. Strata never switches to a local build by itself, not even when i
 
 Stop the running source engine before replacing it. Run `UPDATE.bat` on Windows or `./setup.sh --update` on Linux and Mac.
 In a Git checkout the updater can pull source changes, update dependencies and refresh installed configs without
-starting the model. A source ZIP cannot pull Git history: extract a newer source archive instead.
+starting the model. It also decides the n-gram table's mode (`--ple-io ram`) again, from the RAM that is free when it
+runs, so a config from an earlier setup is not left asking to lock the table on a PC where the table and the model no
+longer fit together. A `--ple-io` you set by hand (in the config's `user_args`) is left alone. A source ZIP cannot pull Git history: extract a newer source archive instead.
 Preserve your configs and data location when moving between checkouts.
 
 Since 0.2.16 the checkout has a folder for each part (`app/`, `engine/`, `terminal/`, `docs/`, `tools/`). A run config that names a file

@@ -1404,6 +1404,25 @@ def _cgroup_memory_limit(self_cgroup="/proc/self/cgroup", root="/sys/fs/cgroup")
     return cgroup_memory.memory_limit(self_cgroup, root)
 
 
+def ram_available_gb() -> float:
+    """The RAM a program may still take, in GB (GiB): MemAvailable on Linux, free physical memory on Windows, 0 where
+    it is not measured.  Setup decides on --ple-io ram (a 28.8 GB table locked in RAM) with this figure and not with the
+    PC's total: the lock is taken before the engine fills its expert arena, and both have to fit in the RAM that is free
+    then (a 93.5 GiB PC with 62.6 GiB free and a 53.3 GiB arena cannot hold a 28.5 GB table as well, #4846)."""
+    if WIN:
+        return _memory_status().ullAvailPhys / 2**30
+    if sys.platform == "darwin":
+        return 0.0                                     # not measured there: setup uses the total, as before
+    try:
+        with open("/proc/meminfo") as stream:
+            for line in stream:
+                if line.startswith("MemAvailable"):
+                    return int(line.split()[1]) * 1024 / 2**30
+    except (OSError, ValueError):
+        pass
+    return 0.0
+
+
 _MM_KEY = r"SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"
 
 
@@ -8078,6 +8097,24 @@ def is_wsl() -> bool:
     return sys.platform.startswith("linux") and "microsoft" in platform.uname().release.lower()
 
 
+def ple_table_bytes(path: Path) -> int | None:
+    """The n-gram table's bytes in a model file: its per_layer_token_embd tensor, or the whole file when the table is a
+    file of its own (--ple-gguf ple-fp8.gguf, the repacked ones).  None when the file is not here or not readable."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    from gguf_reader import GGUFFile                # setup's own reader (setup's other probes do the same)
+    try:
+        if not path.is_file():
+            return None
+        for t in GGUFFile(path).tensors:
+            if t.name == "per_layer_token_embd.weight":
+                n = getattr(t, "expected_bytes", lambda: None)()
+                if n:
+                    return int(n)
+        return path.stat().st_size
+    except Exception:                                  # a file that is not a gguf (yet): no size to decide with
+        return None
+
+
 def ple_ram_platform_ok() -> bool:
     """147-verify: --ple-io ram for a PC with RAM to spare was measured on Linux only (Windows locks pages differently and
     WSL pins little), so only there."""
@@ -8448,12 +8485,67 @@ def move_over_old_layout() -> list:
     return moved
 
 
+def refresh_table_mode(cfg_path: Path) -> str | None:
+    """#4846: the n-gram table's mode (--ple-io ram) was decided with the RAM that was free on the day setup ran.
+    --update and --calibrate decide it again with the RAM free now, so a config written by an earlier setup holds what
+    the machine holds today: the table's lock is taken before the expert arena is filled, and a hand-set --ple-io ram
+    also turns the arena's RAM fallback off, so the two have to fit together (on a PC with 62.6 GB of its 93.5 GB free,
+    the table was locked and the 53.3 GB arena did not fit: the host stalled in reclaim).  A --ple-io the person set (in
+    "user_args", or a mode setup does not write, direct / mmap), a PC where the mode was not measured (Windows, WSL,
+    a Mac) and a config whose table is not downloaded yet keep their args.  Returns the line for a change, else None."""
+    from strata_control.setup_config import table_ram_wanted
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    args = cfg.get("args")
+    model = choices_from_config(cfg_path).get("model")
+    if not isinstance(args, list) or model not in MODELS:
+        return None
+    mine = user_args.capture(cfg, SETUP_CHOICE_FLAGS)
+    if "--ple-io" in {user_args.flag_of(g) for g in user_args.groups(mine)}:
+        return None                                    # the person's own mode: it goes over setup's (carry_user_args)
+    was = flag_value(args, "--ple-io")
+    ple = flag_value(args, "--ple-gguf")
+    free = ram_available_gb()
+    if was not in (None, "ram") or not ple or free <= 0:
+        return None                                    # direct / mmap (a hand's), no table in this model, no RAM figure
+    table = ple_table_bytes(Path(ple)) or 28_800_000_000   # the size setup writes when the table cannot be read (#605)
+    disk = None if is_wsl() else rotational_disk(ple)
+    if not (disk or ple_ram_platform_ok()):
+        return None                                    # where it was not measured, the config's mode is the person's
+    table_gb = table / 1e9
+    low_ram = "--resident-budget-gib" in args or "--resident-experts" in args
+    want, need = table_ram_wanted(MODELS[model]["ram_gb"], disk, table_gb, free, low_ram, ple_ram_platform_ok())
+    if want == (was == "ram"):
+        return None
+    new = user_args.flat([g for g in user_args.groups(args) if user_args.flag_of(g) != "--ple-io"])
+    if want:
+        new = [*new, "--ple-io", "ram"]
+    try:
+        shutil.copyfile(cfg_path, cfg_path.with_name(cfg_path.name + ".bak"))
+    except OSError as e:
+        warn(f"could not keep a copy of the earlier {cfg_path.name} ({e.strerror or e})")
+    tracked = user_args.WRITTEN_KEY in cfg             # an earlier setup kept what it wrote (an old config has no such record)
+    cfg["args"] = new
+    if tracked:
+        user_args.stamp(cfg, mine)                     # setup's change: a later run does not carry it as the person's
+    write_config(cfg_path, cfg)
+    name = cfg.get("model_name") or cfg_path.stem
+    slack = 4 if disk else 16
+    if want:
+        return (f"{name}: --ple-io ram added ({free:.0f} GB of RAM free now; the table, the model and {slack} GB to "
+                f"spare need {need:.0f} GB)")
+    return (f"{name}: --ple-io ram taken out ({free:.0f} GB of RAM free now; the table, the model and {slack} GB to "
+            f"spare need {need:.0f} GB, so the engine would lock the table and then not fit the arena)")
+
 
 def update_install(have: list, a) -> int:
     """#475: `setup.py --update` (START-HERE.bat --update, ./setup.sh --update, after update_pull): what a plain START-HERE.bat does to
     an install before it starts the model, without starting it - the Python packages, the ready-made engine when this
     setup needs a newer one (MIN_ENGINE; a compiled engine when its source changed), each installed model's config
-    upgrades and its draft subset.  No question is asked and the model files are not touched; a model still running
+    upgrades, its draft subset and the n-gram table's mode (--ple-io ram, decided again for the RAM free now).  No
+    question is asked and the model files are not touched; a model still running
     keeps its engine (update_installed_engine says to close it and run this again)."""
     have = [p for p in have if model_config(p)]        # #549: a strata-*.json that is no model config is skipped
     if not have:
@@ -8470,7 +8562,11 @@ def update_install(have: list, a) -> int:
             refresh_shared_draft_vocab(cfg, mtp_done)
         if cfg.get("backend") == "hip" and WIN:
             hip_runtime_beside_exe(Path(cfg["exe"]).parent)   # #468 #461
-        ok(f"{cfg.get('model_name', cfg_path.stem)}: up to date")
+        note = refresh_table_mode(cfg_path)            # #4846: the table's mode, for the RAM that is free now
+        if note:
+            say(f"  {note}")
+        else:
+            ok(f"{cfg.get('model_name', cfg_path.stem)}: up to date")
     ver = config_engine_version(json.loads(have[0].read_text(encoding="utf-8-sig")))
     say()
     start = "START-HERE.bat" if WIN else "./setup.sh"
@@ -11565,6 +11661,10 @@ def main() -> int:
                  "calibrate an installed model, or set this one up first without --calibrate")
         have = targets
         engine_update_note()
+        for c in have:                                # #4846: the table's mode, before the tuning reads the args
+            note = refresh_table_mode(c)
+            if note:
+                say(f"  {note}")
         pick_cfg = have[0]
         if len(have) > 1:
             say()
@@ -12348,7 +12448,7 @@ def main() -> int:
                       *(["--embd-gguf", str(embd)] if embd else [])]
     from strata_control import setup_config            # the seam: the lines that built the run config live in strata_control/setup_config.py
     _built = setup_config.config_for(setup_config.SetupInputs(
-        a=a, adopted=adopted, chosen=chosen, cuda_tk=cuda_tk, draft_vocab=draft_vocab, eng=eng, engine_ver=engine_ver, esp=esp, fam=fam, family=family, gpu=gpu, hip=hip, in_budget=in_budget, lib_dirs=lib_dirs, low_ram=low_ram, meta=meta, mmproj=mmproj, model=model, model_args=model_args, models_dir=models_dir, multi=multi, pack=pack, ple=ple, port=port, q4_split=q4_split, ram=ram, reader=reader, ready=ready, rope_scale=rope_scale, rt=rt, scaling=scaling, shards=shards, tag=tag, vision=vision, ctx=ctx, kv=kv, resident=resident, budget=budget, GGUFFile=GGUFFile), sys.modules[__name__])
+        a=a, adopted=adopted, chosen=chosen, cuda_tk=cuda_tk, draft_vocab=draft_vocab, eng=eng, engine_ver=engine_ver, esp=esp, fam=fam, family=family, gpu=gpu, hip=hip, in_budget=in_budget, lib_dirs=lib_dirs, low_ram=low_ram, meta=meta, mmproj=mmproj, model=model, model_args=model_args, models_dir=models_dir, multi=multi, pack=pack, ple=ple, port=port, q4_split=q4_split, ram=ram, ram_free=ram_available_gb() or None, reader=reader, ready=ready, rope_scale=rope_scale, rt=rt, scaling=scaling, shards=shards, tag=tag, vision=vision, ctx=ctx, kv=kv, resident=resident, budget=budget, GGUFFile=GGUFFile), sys.modules[__name__])
     cfg, cfg_path, cal, args, ctx, kv, resident = (_built.cfg, _built.cfg_path, _built.cal, _built.args, _built.ctx, _built.kv, _built.resident)
     write_setup_config(cfg_path, cfg, adopted if adopted is not None and adopted.name == cfg_path.name else None, explicit_args(a),
                        after_carry=(lambda c: uma_cache_guard(c, model, gpu)) if gpu.get("uma") else None)

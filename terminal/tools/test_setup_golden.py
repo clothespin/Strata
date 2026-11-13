@@ -64,11 +64,12 @@ def normalize(v, t: Path):
     return v
 
 
-def install(ram, found, argv, answers=None, extra=(), avx512=False, configs=()):
+def install(ram, found, argv, answers=None, extra=(), avx512=False, configs=(), free=None):
     """setup.main() on a mocked PC -> (exit code, printed text, the written config or None, the questions asked).
     answers: None = --yes (a question fails the run), "" = Enter for every question, a list of answers in order, or
     {words of a question: its answer} (Enter for the others).
-    extra: more patches (mock.patch objects).  configs: (name, dict) run configs already in the Strata folder."""
+    extra: more patches (mock.patch objects).  configs: (name, dict) run configs already in the Strata folder.
+    ram: the PC's total RAM; free: the RAM free at setup time (None = an idle PC: the total, as the goldens have it)."""
     with tempfile.TemporaryDirectory() as tmp:
         t = Path(tmp)
         (t / "data" / "mtp" / "rt").mkdir(parents=True)
@@ -105,6 +106,7 @@ def install(ram, found, argv, answers=None, extra=(), avx512=False, configs=()):
             mock.patch.object(setup, "card_speeds", lambda: {}),
             mock.patch.object(setup, "amd_gpus", lambda: []),
             mock.patch.object(setup, "ram_gb", lambda: ram),
+            mock.patch.object(setup, "ram_available_gb", lambda: ram if free is None else free),
             mock.patch.object(setup, "cpu_info", lambda: ("Test CPU", True, avx512)),
             mock.patch.object(setup, "cpu_cores", lambda: None),   # #642: not a hybrid CPU
             mock.patch.object(setup, "vision_threads", lambda logical=None: 6),   # the baseline PC has 12 logical CPUs; the runner's own count must not change the golden config

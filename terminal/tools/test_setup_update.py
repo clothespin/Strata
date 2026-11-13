@@ -135,6 +135,78 @@ class Update(unittest.TestCase):
         self.assertEqual(code, 7)
         up.assert_not_called()
 
+    # #4846: the n-gram table's mode (--ple-io ram) is decided from the RAM that is free, so a config written by an
+    # earlier setup (or on a quiet desktop) is decided again by --update and --calibrate
+
+    def table_config(self, d: Path, ple_io: str | None = None) -> Path:
+        p = self.config(d)
+        cfg = json.loads(p.read_text(encoding="utf-8"))
+        cfg["args"] += ["--ple-gguf", str(d / "model.gguf")] + (["--ple-io", ple_io] if ple_io else [])
+        cfg["args_written"] = list(cfg["args"])              # a recent setup keeps a record of what it wrote (user_args)
+        p.write_text(json.dumps(cfg), encoding="utf-8")
+        return p
+
+    def refresh(self, p: Path, free: float, platform_ok: bool = True):
+        with mock.patch.object(setup, "ple_table_bytes", return_value=28_800_000_000), \
+                mock.patch.object(setup, "ram_available_gb", return_value=free), \
+                mock.patch.object(setup, "rotational_disk", return_value=None), \
+                mock.patch.object(setup, "ple_ram_platform_ok", return_value=platform_ok):
+            return setup.refresh_table_mode(p)
+
+    def test_the_table_mode_is_decided_again(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.table_config(Path(d))                       # a config from an earlier setup: no --ple-io
+            fit = setup.MODELS[setup.choices_from_config(p)["model"]]["ram_gb"] + 28.8 + 16 + 5
+            self.assertIn("--ple-io ram added", self.refresh(p, fit) or "")
+            self.assertEqual(setup.flag_value(json.loads(p.read_text())["args"], "--ple-io"), "ram")
+            self.assertIsNone(self.refresh(p, fit))              # nothing to change the second time
+            self.assertIn("--ple-io ram taken out", self.refresh(p, fit - 30) or "")   # the desktop took 30 GB since
+            cfg = json.loads(p.read_text())
+            self.assertIsNone(setup.flag_value(cfg["args"], "--ple-io"))
+            self.assertEqual(cfg["args_written"], cfg["args"])  # setup's change, not the person's (user_args)
+            self.assertNotIn("--ple-io", cfg.get("user_args") or [])
+            self.assertTrue(p.with_name(p.name + ".bak").is_file())
+
+    def test_an_old_config_gets_no_record_it_did_not_have(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.table_config(Path(d), "ram")
+            cfg = json.loads(p.read_text(encoding="utf-8"))
+            del cfg["args_written"]                              # written before setup kept the record
+            p.write_text(json.dumps(cfg), encoding="utf-8")
+            fit = setup.MODELS[setup.choices_from_config(p)["model"]]["ram_gb"] + 28.8 + 16 + 5
+            self.assertIn("--ple-io ram taken out", self.refresh(p, fit - 30) or "")
+            cfg = json.loads(p.read_text(encoding="utf-8"))
+            self.assertIsNone(setup.flag_value(cfg["args"], "--ple-io"))
+            self.assertNotIn("args_written", cfg)                # so an option written there stays the person's (user_args)
+
+    def test_a_mode_the_person_set_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.table_config(Path(d), "ram")
+            cfg = json.loads(p.read_text())
+            cfg["user_args"] = ["--ple-io", "mmap"]               # their own mode, and their own key
+            p.write_text(json.dumps(cfg), encoding="utf-8")
+            self.assertIsNone(self.refresh(p, 60.0))             # far too little RAM to fit the table
+            self.assertEqual(setup.flag_value(json.loads(p.read_text())["args"], "--ple-io"), "ram")
+
+    def test_a_pc_where_the_mode_was_not_measured_keeps_its_args(self):   # Windows, WSL, a Mac
+        with tempfile.TemporaryDirectory() as d:
+            p = self.table_config(Path(d), "ram")
+            self.assertIsNone(self.refresh(p, 20.0, platform_ok=False))
+            self.assertEqual(setup.flag_value(json.loads(p.read_text())["args"], "--ple-io"), "ram")
+
+    def test_update_prints_the_redecided_mode(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.table_config(Path(d), "ram")
+            model = setup.choices_from_config(p)["model"]
+            with mock.patch.object(setup, "ple_table_bytes", return_value=28_800_000_000), \
+                    mock.patch.object(setup, "ram_available_gb", return_value=setup.MODELS[model]["ram_gb"]), \
+                    mock.patch.object(setup, "rotational_disk", return_value=None), \
+                    mock.patch.object(setup, "ple_ram_platform_ok", return_value=True):
+                rc, *_, out = self.run_update([p])
+            self.assertEqual(rc, 0)
+            self.assertIn("--ple-io ram taken out", out)
+            self.assertNotIn("up to date", out)                  # the line says what changed, not that nothing did
+
 
 class SettingsLine(unittest.TestCase):
     """#564: a start prints the settings it uses (the engine options without the model's paths, and the server's
